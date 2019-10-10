@@ -228,7 +228,7 @@ if __name__ == "__main__":
         start_epoch, G_losses, D_losses = loadCheckpoint(G, G_optimiser, D, D_optimiser, model_name)
     latent_noise = torch.randn(8, noise_dim, 1, 1, device=device)
     test_images_log = [G(latent_noise)]
-    #visualiseProgress(test_images_log)
+    visualiseProgress(test_images_log)
     for epoch in range(start_epoch, num_epochs):
 
         for it, data in enumerate(trainloader):
