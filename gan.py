@@ -249,7 +249,7 @@ if __name__ == "__main__":
             D_fake_out = D(G_out)
             D_fake_loss = BCE_L(D_fake_out, label_fake)
 
-            D_train_loss = D_real_loss + D_fake_loss
+            D_train_loss = (D_real_loss + D_fake_loss)/2        # One way of standardising disc and gen losses
             D.zero_grad()
             D_train_loss.backward()
             D_optimiser.step()
