@@ -325,12 +325,76 @@ def fid_stats_data(dataset, inceptionModel, filename):
     return mu, sigma
 
 
-def reconImage(obs_images, boxes, generator, discriminator):
+def obstructImage(image, height, width):
+    # For now apply a box obstruction, but later apply a random boolean mask obstruction.
+    # Actually only need the mask, box obstruction for visualisation
+    # Then we can just use this mask for indexing for region replacement and weight adjustment
+    image_height = image.shape[2]
+    image_width = image.shape[3]
+    border = 8
+    ### Apply a random obstruction to the image (For now apply a grey box)
+    top_left_y = np.random.randint(border, image_height-height-border)
+    top_left_x = np.random.randint(border, image_width-width-border)
+    bottom_right_y = top_left_y+image_height
+    bottom_right_x = top_left_x+image_width
+    obstructed_region = [top_left_y, bottom_right_y, top_left_x, bottom_right_x]              # y1, y2, x1, x2
+    obstructed_image = torch.tensor(image)  # copy image
+    obstructed_image[0, :, top_left_y:bottom_right_y, top_left_x: bottom_right_x] = ((96/255)-0.5)*2   # Normalise with [-1,1]
+    return obstructed_image, obstructed_region
+
+
+def getMSEWeightsMaskless(image_size=64):
+    xx, yy = np.meshgrid(range(image_size), range(image_size))
+    xx_d = xx - image_size//2
+    yy_d = yy - image_size//2
+    mse_weights = xx_d**2+yy_d**2
+    mse_weights = torch.from_numpy(1 - mse_weights/mse_weights.max())
+
+    # index_tensor = torch.zeros((1,3,image_size,image_size))
+    # for i in range(image_size):
+    #     for j in range(image_size):
+    #         index_tensor[0,:,i,j] = 1 - ((image_size//2 - i)**2 + (image_size//2 - j)**2)/((image_size**2)/2)
+
+    return mse_weights.float()          # Very basic radial mask
+
+
+def weightedMSELoss(image1, image2, mse_weights, mask, image_size = 64):
+    # One weighting approach where the weights are directly related to distance from obstructed region
+    mse_weights = mask.float() * mse_weights
+    # TODO: Apply reweighting after masking
+
+    return torch.mean(mse_weights*(image1-image2)**2)
+
+
+
+def freeze_model(model):
+    for params in model.parameters():
+        params.requires_grad = False
+
+
+def unfreeze_model(model):
+    for params in model.parameters():
+        params.requires_grad = True
+
+
+
+def reconImage(obs_images, mask, generator, discriminator):
+
+    mse_weights = getMSEWeightsMaskless(image_size=64).to(device)
+
     # ONLY WORKS WITH ONE IMAGE
-    num_steps = 2000
+    generator.eval()
+    discriminator.eval()
+    # To speed up computations we turn off the autograd engine for the network parameters.
+    # Cannot use torch.no_grad(), since this will also prevent gradient calculation for total_loss
+    freeze_model(generator)
+    freeze_model(discriminator)
+    num_steps = 1000
     obs_images = obs_images.to(device)
-    outobsvis = torchvision.utils.make_grid(obs_images.detach().cpu(), normalize=True)
+
+    outobsvis = torchvision.utils.make_grid((obs_images*mask.float()).detach().cpu(), normalize=True)   # Not black since in [-1,1]
     plt.imshow(outobsvis.numpy().transpose((1, 2, 0)))
+
     num_images = obs_images.shape[0]
     noise_dim = 100
     BCE_R = nn.BCELoss()
@@ -356,7 +420,7 @@ def reconImage(obs_images, boxes, generator, discriminator):
         D_gen_loss = BCE_R(D_gen_out, label_real)
 
         # Let's try MSE LOSS ONLY IN CENTRAL REGION
-        recon_loss = MSE_R(obs_images[:,:,16:49,16:49], gen_images[:,:,16:49,16:49])        # Make this a function of corrupted box
+        recon_loss = weightedMSELoss(obs_images, gen_images, mse_weights, mask)        # Make this a function of corrupted box
         # Find that we need to scale the reconstruction penalty much more
         # We may even want to make the recon_loss scale a function of the number of steps. We would want to initially
         # have a highly penalised reconstruction loss to get close to the image we want to reconstruct.
@@ -374,11 +438,13 @@ def reconImage(obs_images, boxes, generator, discriminator):
         # latent_noise.data -= lr*gradient
         #
         # latent_noise.grad.zero_()
-
+    unfreeze_model(generator)
+    unfreeze_model(discriminator)
     gen_progress = torch.cat(gen_progress, dim=0)
     plt.figure(figsize=(12,8))
     outvis = torchvision.utils.make_grid(gen_progress.detach().cpu(), normalize=True)
     plt.imshow(outvis.numpy().transpose((1, 2, 0)))
+
 
 if __name__ == "__main__":
 
@@ -454,7 +520,10 @@ if __name__ == "__main__":
     start_epoch = 0
     if start_from_checkpoint:
         start_epoch, G_losses, D_losses = loadCheckpoint(G, G_optimiser, D, D_optimiser, model_name)
-    reconImage(dataset[0][0].unsqueeze(dim=0), [], G, D)
+
+    mask = torch.ones((64, 64), dtype=torch.bool, device=device)
+    mask[10:20, 20:30] = 0
+    reconImage(dataset[0][0].unsqueeze(dim=0), mask, G, D)
     # Apply basic Frechet distance calculation
 
     # fid_value = figGenVsCelebA(G, inceptionModel, num_images=10000, batch_size=100, cuda=cuda)
