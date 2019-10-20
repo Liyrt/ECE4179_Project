@@ -16,118 +16,85 @@ import os
 from inception import InceptionV3
 from fid import figGenVsCelebA
 
-from dcgan import DC_GAN
+from dcgan import DC_GAN, visualise_train_progress
 from aux_funcs import freeze_model, unfreeze_model, weight_init
-from reconstruct import recon_mask
+from reconstruct import recon_mask, backpropLatent, getReconWeightsMaskless
 
-
-def obstructImage(image, height, width):
-    # For now apply a box obstruction, but later apply a random boolean mask obstruction.
-    # Actually only need the mask, box obstruction for visualisation
-    # Then we can just use this mask for indexing for region replacement and weight adjustment
-    image_height = image.shape[2]
-    image_width = image.shape[3]
+# Create function using meshgrid to create mask of arbitrary shape
+def createMask(num_images, image_size, device, mask_pos=(20,25), mask_size=(10,10), rand_mask=False):
     border = 8
-    ### Apply a random obstruction to the image (For now apply a grey box)
-    top_left_y = np.random.randint(border, image_height-height-border)
-    top_left_x = np.random.randint(border, image_width-width-border)
-    bottom_right_y = top_left_y+image_height
-    bottom_right_x = top_left_x+image_width
-    obstructed_region = [top_left_y, bottom_right_y, top_left_x, bottom_right_x]              # y1, y2, x1, x2
-    obstructed_image = torch.tensor(image)  # copy image
-    obstructed_image[0, :, top_left_y:bottom_right_y, top_left_x: bottom_right_x] = ((96/255)-0.5)*2   # Normalise with [-1,1]
-    return obstructed_image, obstructed_region
+    mask = torch.ones((num_images, image_size, image_size), dtype=torch.bool, device=device)
+    for i in range(num_images):
+        if rand_mask:
+            # Apply a random obstruction to the image (For now apply a grey box)
+            top_left_y = np.random.randint(border, image_size-mask_size[0]-border)
+            top_left_x = np.random.randint(border, image_size-mask_size[1]-border)
+            bottom_right_y = top_left_y+mask_size[0]
+            bottom_right_x = top_left_x+mask_size[1]
+        else:
+            top_left_y = mask_pos[0]
+            top_left_x = mask_pos[1]
+            bottom_right_y = top_left_y+mask_size[0]
+            bottom_right_x = top_left_x+mask_size[1]
 
+        mask[i, top_left_y:bottom_right_y, top_left_x: bottom_right_x] = 0
 
+    return mask
 
+def getLowDiscVal(images, generator, discriminator, device):
+    images = images.to(device)
+    disc_vals = discriminator(images)
+    disc_inds = torch.argsort(disc_vals)
+    fig, axs = plt.subplots(1,4)
+    fig.set_size_inches(16,5)
 
+    latent_noise = torch.randn(64, 100, 1, 1, device=device, requires_grad=True)
+    reconOptim = optim.Adam([latent_noise], lr=0.01)
+    backpropLatent(images, torch.ones((64, 64), dtype=torch.bool, device=device), 1000, reconOptim, generator, discriminator, latent_noise, device)
+    gen_images = generator(latent_noise)
+    disc_gen = discriminator(gen_images)
+    disc_gen_desc = torch.argsort(disc_gen, descending=True)
+    low_disc_im = torch.cat((images[disc_inds[0:2]], gen_images[disc_gen_desc[0:2]]))
+    low_disc_vals = torch.cat((disc_vals[disc_inds[0:2]], disc_gen[disc_gen_desc[0:2]]))
 
-# def reconImage(obs_images, mask, generator, discriminator):
-#
-#     # TODO: MAKE THIS HANDLE MULTIPLE IMAGES (BACKPROPATE VIA A VECTOR OF LOSSES)
-#
-#     mse_weights = getMSEWeightsMaskless(image_size=64).to(device)
-#
-#     # ONLY WORKS WITH ONE IMAGE
-#     generator.eval()
-#     discriminator.eval()
-#     # To speed up computations we turn off the autograd engine for the network parameters.
-#     # Cannot use torch.no_grad(), since this will also prevent gradient calculation for total_loss
-#     freeze_model(generator)
-#     freeze_model(discriminator)
-#     num_steps = 2000
-#     obs_images = obs_images.to(device)
-#
-#     outobsvis = torchvision.utils.make_grid((obs_images*mask.float()).detach().cpu(), normalize=True)   # Not black since in [-1,1]
-#     plt.imshow(outobsvis.numpy().transpose((1, 2, 0)))
-#
-#     num_images = obs_images.shape[0]
-#     noise_dim = 100
-#     BCE_R = nn.BCELoss()
-#     MSE_R = nn.MSELoss()
-#     label_real = torch.full((num_images,), 1, device=device)
-#
-#
-#     # Need to ensure that requires_grad is set to True after the variable is created on the desired device
-#     latent_noise = torch.randn(num_images, noise_dim, 1, 1, device=device, requires_grad=True)
-#     #latent_noise = torch.randn(num_images, noise_dim, 1, 1, device=device, requires_grad=True)
-#
-#     lr = 0.2
-#     reconOptim = optim.SGD([latent_noise], lr=lr)
-#
-#     recon_loss_scale = 10
-#
-#     gen_progress = []
-#     losses = []
-#     for step in range(num_steps):
-#         ### THEN TRY WITH ADAM
-#         gen_images = generator(latent_noise)
-#         if step % 50 == 0:
-#             gen_progress.append(gen_images.detach().cpu())
-#         D_gen_out = discriminator(gen_images)
-#         D_gen_loss = BCE_R(D_gen_out, label_real)
-#
-#         # Let's try MSE LOSS ONLY IN CENTRAL REGION
-#         recon_loss = weightedMSELoss(obs_images, gen_images, mse_weights, mask)        # Make this a function of corrupted box
-#         # Find that we need to scale the reconstruction penalty much more
-#         # We may even want to make the recon_loss scale a function of the number of steps. We would want to initially
-#         # have a highly penalised reconstruction loss to get close to the image we want to reconstruct.
-#         # Then we we are closer we wish to make that image more realistic
-#
-#         total_loss = D_gen_loss + recon_loss_scale*recon_loss
-#         losses.append(total_loss.item())
-#
-#         reconOptim.zero_grad()
-#         total_loss.backward()
-#         reconOptim.step()
-#
-#         # USING MANUAL UPDATE (NO OPTIMISER)
-#         # gradient = latent_noise.grad.detach()
-#         # latent_noise.data -= lr*gradient
-#         #
-#         # latent_noise.grad.zero_()
-#     unfreeze_model(generator)
-#     unfreeze_model(discriminator)
-#     gen_progress = torch.cat(gen_progress, dim=0)
-#     plt.figure(figsize=(12,8))
-#     outvis = torchvision.utils.make_grid(gen_progress.detach().cpu(), normalize=True)
-#     plt.imshow(outvis.numpy().transpose((1, 2, 0)))
-#
-#     recon_fill = obs_images*mask.float() + generator(latent_noise)*(~mask).float()
-#     out_fill = torchvision.utils.make_grid(torch.cat((recon_fill, obs_images, obs_images*mask.float())).detach().cpu(), normalize=True)
-#     plt.figure(figsize=(6,6))
-#     plt.imshow(out_fill.numpy().transpose((1, 2, 0)))
-#     plt.axis('off')
-#     plt.show()
-#     print('a')
+    for i in range(4):
+        axs[i].imshow(0.5 * (low_disc_im[i].detach().cpu().numpy().transpose(1, 2, 0) + 1))
+        axs[i].set_title('%.4f' % low_disc_vals[i].item())
+        axs[i].axis('off')
+    fig.tight_layout()
 
+def pixelWeightChoices(filename, mask):
+    n_arr = [0.5,1,4]
+    fig, axs = plt.subplots(1,len(n_arr)+1)
+    fig.set_size_inches(12,3)
+    for i in range(len(n_arr)):
+        pixWeights = getReconWeightsMaskless(64, n_arr[i])
+        axs[i].imshow(pixWeights)
+        axs[i].set_title('n = %.2f' % n_arr[i])
+        #axs[i].axis('off')
+    im_i = axs[len(n_arr)].imshow(getReconWeightsMaskless(64,1)*(mask.float().cpu()))
+    axs[len(n_arr)].set_title('n = 1 with Mask')
+    #plt.colorbar(im_i)
+    fig.tight_layout()
+    fig.savefig(filename)
+
+def visualiseGAN(generator, filename):
+    # Visualise model
+    num_samples = 48
+    plt.figure(figsize=(12,3))
+    #test_noise = 2*torch.rand(48, 100, 1, 1, device=device)-10      # Uniform in [-1,1]     (Gives more 'nice faces', slighly less variety)
+    test_noise = torch.randn(num_samples, 100, 1, 1, device=device)          # Normal(0,1)
+    outvis = torchvision.utils.make_grid(generator(test_noise).detach().cpu(), normalize=True, nrow=12)
+    plt.imshow(outvis.numpy().transpose((1, 2, 0)))
+    plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(filename)
 
 if __name__ == "__main__":
 
     ### TESTING WITH REPRODUCIBILITY. Remove when training
-    # torch.manual_seed(0)
-    # np.random.seed(0)
-
+    torch.manual_seed(0)
+    np.random.seed(0)
     Model_Path = "Models"
     if not os.path.isdir(Model_Path):
         os.makedirs(Model_Path)
@@ -161,17 +128,10 @@ if __name__ == "__main__":
     testloader = datautils.DataLoader(testdata, batch_size=batch_size, shuffle=False, num_workers=n_workers)
 
 
-    noise_dim = 100
-    # G = DC_Generator(64).to(device)
-    # G.apply(weight_init)
-    #
-    # D = DC_Discriminator(64).to(device)
-    # D.apply(weight_init)
-    #
-    #
     lr_nGAN = 0.0002
     lr_wGAN = 0.00005
-    num_epochs = 20
+    lr_wGAN_gp = 0.0001
+    num_epochs = 30
     nGAN = DC_GAN(device, 'DC_GAN_64_bSize', gan_type = 'normal')
     nD_optimiser = optim.Adam(nGAN.D.parameters(), lr=lr_nGAN, betas=(0.5,0.999))
     nG_optimiser = optim.Adam(nGAN.G.parameters(), lr=lr_nGAN, betas=(0.5,0.999))
@@ -186,99 +146,36 @@ if __name__ == "__main__":
     if start_from_checkpoint:
         wGAN.load_checkpoint(train=train_from_checkpoint)
 
+    # wGAN_gp = DC_GAN(device, 'wDC_gp_GAN_64_bSize', gan_type = 'wgan_gp')
+    # wD_gp_optimiser = optim.Adam(wGAN_gp.D.parameters(), lr=lr_wGAN_gp, betas=(0.5,0.9))
+    # wG_gp_optimiser = optim.Adam(wGAN_gp.G.parameters(), lr=lr_wGAN_gp, betas=(0.5,0.9))
+    # wGAN_gp.prep_train(wD_gp_optimiser, wG_gp_optimiser)
+    # if start_from_checkpoint:
+    #     wGAN_gp.load_checkpoint(train=train_from_checkpoint)
+    # wGAN_gp giving garbage (kinda face like, but all same outputs)
+    #wGAN_gp.train_loop(num_epochs, trainloader)
+
+
     #wGAN.train_loop(num_epochs, trainloader)
 
     #nGAN.train_loop(num_epochs, trainloader)
 
-    #
-    # BCE_L = nn.BCELoss()
-    # D_losses = []
-    # G_losses = []
-    #
-    # fixed_latent_noise = torch.randn(8, noise_dim, 1, 1).to(device)
-    # test_images_log = []
-    #
-    # model_name = "FirstModelCropped144"
-    # Save_Path = os.path.join(Model_Path, model_name + ".pt")
-    # start_epoch = 0
+    # visualiseGAN(wGAN.G, 'WGAN_faces')
+    # visualiseGAN(nGAN.G, 'NGAN_faces')
+    # wgan_ep_steps = [0,1,2,3,4,6,8,12,16,22]
+    # visualise_train_progress([wGAN.test_images_log[i] for i in wgan_ep_steps], 'wGANProgress', wgan_ep_steps)
 
-    mask = torch.ones((64, 64), dtype=torch.bool, device=device)
-    mask[10:50, 20:50] = 0
-    recon_mask(next(iter(testloader))[0][0:6], mask, nGAN.G, nGAN.D, device=device)
+    #ite = iter(testloader)
+    #next(ite)
+    #getLowDiscVal(next(ite)[0], wGAN.G, wGAN.D, device)
+    # mask = createMask(10, image_size, device, mask_pos=(20,25), mask_size=(20,20), rand_mask=True)
+    #pixelWeightChoices('pixel_weight_powers', mask)
+    # recon_mask(next(iter(testloader))[0][0:10], mask, nGAN.G, nGAN.D, device=device)
+    # Maybe take in list of generators and discriminators
 
     # Apply basic Frechet distance calculation
-    # inceptionModel = InceptionV3().to(device)
-    # fid_value = figGenVsCelebA(G, inceptionModel, num_images=10000, batch_size=100, cuda=cuda)
-
-    #test_images_log = [G(fixed_latent_noise)]
-    #visualiseProgress(test_images_log)
-
-
-    # Training
-    # G.train()
-    # D.train()
-    # for epoch in range(start_epoch, num_epochs):
-    #
-    #     for it, data in enumerate(trainloader):
-    #         images, _ = data
-    #         images = images.to(device)
-    #
-    #         b_size = images.shape[0]
-    #         label_real = torch.full((b_size,), 1, device=device)
-    #         label_fake = torch.full((b_size,), 0, device=device)
-    #
-    #         ### TRAIN DISCRIMINATOR
-    #         freeze_model(G)
-    #         latent_noise = torch.randn(b_size, noise_dim, 1, 1, device=device)
-    #         G_out = G(latent_noise)
-    #
-    #         D_real_out = D(images)
-    #         D_real_loss = BCE_L(D_real_out, label_real)
-    #
-    #         D_fake_out = D(G_out)
-    #         D_fake_loss = BCE_L(D_fake_out, label_fake)
-    #
-    #         D_train_loss = (D_real_loss + D_fake_loss)/2        # One way of standardising disc and gen losses
-    #         D.zero_grad()
-    #         D_train_loss.backward()
-    #         D_optimiser.step()
-    #         D_losses.append(D_train_loss.item())
-    #         unfreeze_model(G)
-    #
-    #         ### TRAIN GENERATOR
-    #         freeze_model(D)
-    #         latent_noise = torch.randn(b_size, noise_dim, 1, 1, device=device)
-    #         G_out = G(latent_noise)     # Should we use a new latent noise vector?
-    #
-    #         D_result = D(G_out)
-    #         G_train_loss = BCE_L(D_result, label_real)    # Minimising -log(D(G(z)) instead of maximising -log(1-D(G(z))
-    #
-    #         G.zero_grad()
-    #         G_train_loss.backward()
-    #         G_optimiser.step()
-    #         G_losses.append(G_train_loss.item())
-    #         unfreeze_model(D)
-    #
-    #         #clear_output(True)
-    #         print('Epoch [%d/%d], Step [%d/%d], D_loss: %.4f, G_loss: %.4f'
-    #               % (epoch+1, num_epochs, it+1, len(trainloader), D_train_loss, G_train_loss))
-    #
-    #     # Log output
-    #     test_fake = G(fixed_latent_noise)
-    #     test_images_log.append(test_fake.detach())
-    #
-    #     visualiseProgress(test_images_log, "Fake_Images_Progress_Cropped"+str(epoch+1))
-    #     # Maintain the most recent model state. Copy to disk
-    #     torch.save({
-    #         'epoch':                epoch,
-    #         'gen_state_dict':       G.state_dict(),
-    #         'disc_state_dict':      D.state_dict(),
-    #         'gen_opt_state_dict':   G_optimiser.state_dict(),
-    #         'disc_opt_state_dict':  D_optimiser.state_dict(),
-    #         'gen_loss':             G_losses,
-    #         'disc_loss':            D_losses,
-    #     }, Save_Path)
-    #
-    # plotLosses(G_losses, D_losses, len(trainloader))
+    inceptionModel = InceptionV3().to(device)
+    fid_value = figGenVsCelebA(wGAN.G, inceptionModel, num_images=20000, batch_size=100, cuda=cuda)
+    print(fid_value)
 
     plt.show()

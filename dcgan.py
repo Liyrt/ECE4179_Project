@@ -9,13 +9,27 @@ import matplotlib.pyplot as plt
 import torchvision
 
 
-def visualise_train_progress(test_images_log, filename):
+def visualise_train_progress(test_images_log, filename, epochs=None):
+    if epochs is None:
+        epochs = [i + 1 for i in range(len(test_images_log))]
     num_its = len(test_images_log)
     all_ims = torch.cat(test_images_log,dim=0)
-    plt.figure(figsize=(16, num_its*2))
-    out = torchvision.utils.make_grid(all_ims.detach().cpu(), normalize=True)
-    plt.imshow(out.numpy().transpose((1, 2, 0)))
-    plt.axis('off')
+
+    fig, axs = plt.subplots(num_its,1)
+    fig.set_size_inches(16, num_its*2)
+    if num_its == 1:
+        out = torchvision.utils.make_grid(test_images_log[0].detach().cpu(), normalize=True)
+        axs.imshow(out.numpy().transpose((1, 2, 0)))
+        axs.set_xticks([], [])
+        axs.set_yticks([], [])
+        axs.set_ylabel('Epoch ' + str(epochs[0]), fontsize=18)
+    else:
+        for i in range(num_its):
+            out = torchvision.utils.make_grid(test_images_log[i].detach().cpu(), normalize=True)
+            axs[i].imshow(out.numpy().transpose((1, 2, 0)))
+            axs[i].set_xticks([], [])
+            axs[i].set_yticks([], [])
+            axs[i].set_ylabel('Epoch ' + str(epochs[i]), fontsize=18)
     plt.tight_layout()
     plt.savefig(filename)
     plt.close()
@@ -78,12 +92,24 @@ class DC_Discriminator(nn.Module):
         ]
         if gan_type == 'normal':
             self.layers.append(nn.Sigmoid())        # Scale between 0 and 1
-
+        if gan_type == 'wgan_gp':
+            self.layers = [  # No bias since batch norm includes bias
+                nn.Conv2d(3, ndf, 4, stride=2, padding=1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(ndf, ndf * 2, 4, stride=2, padding=1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(ndf * 2, ndf * 4, 4, stride=2, padding=1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(ndf * 4, ndf * 8, 4, stride=2, padding=1, bias=False),
+                nn.LeakyReLU(0.2, inplace=True),
+                nn.Conv2d(ndf * 8, 1, 4, stride=1, padding=0, bias=False),
+                #nn.Sigmoid()
+            ]
         self.net = nn.Sequential(*self.layers)
 
     def forward(self, x):
 
-        return self.net(x)
+        return self.net(x).view(-1)
 
 
 class DC_GAN():
@@ -95,11 +121,14 @@ class DC_GAN():
         # WGAN with gradient penalty doesn't use batch normalisation
         self.model_name = model_name
         self.Model_Path = 'Models'
+        self.save_interval = 5
         self.gan_type = gan_type
-        self.n_critic = 5
+        self.n_critic = 5   # 10
+        self.lamb = 10
         self.device = device
         self.noise_dim = 100
         self.fixed_latent_noise = torch.randn(8, self.noise_dim, 1, 1).to(self.device)
+        self.test_images_log = []
         self.BCE_L = nn.BCELoss()
         self.G = DC_Generator(ngf=n_channel_scale).to(self.device)
         self.G.apply(weight_init)
@@ -116,9 +145,19 @@ class DC_GAN():
         self.G_optimiser = G_optimiser
         self.D_optimiser = D_optimiser
 
+    def calc_grad_pen(self, real_images, G_out, device):
+        eps = torch.rand((real_images.shape[0],1,1,1), device=device)
+        eps.expand_as(real_images)
+        x_hat = torch.tensor(eps*real_images + (1-eps)*G_out,requires_grad=True)
+        D_x_hat_out = self.D(x_hat)
+        grads = torch.autograd.grad(outputs=D_x_hat_out, inputs=x_hat, grad_outputs=torch.ones(real_images.shape[0]).to(device)
+                                    , create_graph=True, retain_graph=True)[0] # Every image in batch
+
+        gradient_penalty = self.lamb*((grads.view(real_images.shape[0],-1).norm(2, dim=1)-1)**2).mean()
+        return gradient_penalty
 
     def train_discriminator(self, b_size, images, label_real, label_fake):
-        freeze_model(self.G)
+        freeze_model(self.G)        # Helps speed up training. Although not needed since D_optimiser only updates the parameters of D
         latent_noise = torch.randn(b_size, self.noise_dim, 1, 1, device=self.device)
         G_out = self.G(latent_noise)
 
@@ -140,6 +179,12 @@ class DC_GAN():
             # Clip weights within range
             for param in self.D.parameters():
                 param.data.clamp(-0.01,0.01)        # Maybe replace with hyperparameter argument
+        elif self.gan_type == 'wgan_gp':
+            gradient_penalty = self.calc_grad_pen(images, G_out, self.device)
+            D_train_loss = -(torch.mean(D_real_out) - torch.mean(D_fake_out) - gradient_penalty) / 2
+            self.D.zero_grad()
+            D_train_loss.backward()
+            self.D_optimiser.step()
 
         loss_val = D_train_loss.item()
         self.disc_losses.append(loss_val)
@@ -159,7 +204,7 @@ class DC_GAN():
             self.G.zero_grad()
             G_train_loss.backward()
             self.G_optimiser.step()
-        elif self.gan_type == 'wgan':
+        elif self.gan_type == 'wgan' or self.gan_type == 'wgan_gp':
             G_train_loss = -torch.mean(D_result)
             self.G.zero_grad()
             G_train_loss.backward()
@@ -175,7 +220,6 @@ class DC_GAN():
     def train_loop(self, num_epochs, trainloader):
         self.G.train()
         self.D.train()
-        test_images_log = []
         for epoch in range(self.start_epoch, num_epochs):
             for it, data in enumerate(trainloader):
                 images, _ = data
@@ -189,7 +233,7 @@ class DC_GAN():
                 D_train_loss = self.train_discriminator(b_size, images, label_real, label_fake)
 
                 ### TRAIN GENERATOR (every n_critic iterations, so that we train the generator on new batches always)
-                if self.gan_type == 'wgan':
+                if self.gan_type == 'wgan' or self.gan_type == 'wgan_gp':
                     if it % self.n_critic == 0:
                         G_train_loss = self.train_generator(b_size, label_real)
                         print('Epoch [%d/%d], Step [%d/%d], D_loss: %.4f, G_loss: %.4f'
@@ -209,9 +253,9 @@ class DC_GAN():
 
             # Log output
             test_fake = self.G(self.fixed_latent_noise)
-            test_images_log.append(test_fake.detach())
+            self.test_images_log.append(test_fake.detach())
 
-            visualise_train_progress(test_images_log, self.model_name + "_Progress_" + str(epoch + 1))
+            visualise_train_progress(self.test_images_log, self.model_name + "_Progress_" + str(epoch + 1))
             # Maintain the most recent model state. Copy to disk
             torch.save({
                 'epoch': epoch,
@@ -221,7 +265,23 @@ class DC_GAN():
                 'disc_opt_state_dict': self.D_optimiser.state_dict(),
                 'gen_loss': self.gen_losses,
                 'disc_loss': self.disc_losses,
+                'fixed_latent_noise': self.fixed_latent_noise,
+                'test_images_log': self.test_images_log
             }, os.path.join(self.Model_Path, self.model_name + ".pt"))
+
+            if epoch > 0 and (epoch % self.save_interval == 0):
+                torch.save({
+                    'epoch': epoch,
+                    'gen_state_dict': self.G.state_dict(),
+                    'disc_state_dict': self.D.state_dict(),
+                    'gen_opt_state_dict': self.G_optimiser.state_dict(),
+                    'disc_opt_state_dict': self.D_optimiser.state_dict(),
+                    'gen_loss': self.gen_losses,
+                    'disc_loss': self.disc_losses,
+                    'fixed_latent_noise': self.fixed_latent_noise,
+                    'test_images_log': self.test_images_log
+                }, os.path.join(self.Model_Path, self.model_name + "_epoch_" + str(epoch) + ".pt"))
+
         print('Done Training!')
 
 
@@ -231,6 +291,11 @@ class DC_GAN():
             checkpoint = torch.load(Load_Path)
             self.G.load_state_dict(checkpoint['gen_state_dict'])
             self.D.load_state_dict(checkpoint['disc_state_dict'])
+            try:
+                self.fixed_latent_noise = checkpoint['fixed_latent_noise']
+                self.test_images_log = checkpoint['test_images_log']
+            except KeyError:
+                print('Fixed Latent Noise or Test Images not Stored in Model')
             if train:
                 self.G_optimiser.load_state_dict(checkpoint['gen_opt_state_dict'])  # This also loads the previous lr
                 self.D_optimiser.load_state_dict(checkpoint['disc_opt_state_dict'])

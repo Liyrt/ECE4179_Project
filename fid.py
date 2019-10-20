@@ -1,4 +1,8 @@
 
+"""
+Adapted from https://github.com/mseitzer/pytorch-fid
+"""
+
 import torch
 import torch.utils.data as datautils
 import torch.nn.functional as F
@@ -136,7 +140,7 @@ def figGenVsCelebA(generator, inceptionModel, noise_dim=100, num_images=10000, b
     mu_gen, sigma_gen = calculate_activation_statistics(num_images, generator, inceptionModel, batch_size=batch_size,
                                         dims=2048, noise_dim=noise_dim, cuda=cuda, verbose=False)
 
-    celeba_precalc = np.load('fid_stats_celeba.npz')
+    celeba_precalc = np.load('fid_stats_celeba_crop144_64_our_calc.npz')
     celeba_precalc_mu = celeba_precalc.f.mu
     celeba_precalc_sigma = celeba_precalc.f.sigma
     celeba_precalc.close()
