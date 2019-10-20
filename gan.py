@@ -21,10 +21,12 @@ from aux_funcs import freeze_model, unfreeze_model, weight_init
 from reconstruct import recon_mask, backpropLatent, getReconWeightsMaskless
 
 # Create function using meshgrid to create mask of arbitrary shape
-def createMask(num_images, image_size, device, mask_pos=(20,25), mask_size=(10,10), rand_mask=False):
+def createMask(num_images, image_size, device, mask_pos=(20,25), mask_size=(10,10), rand_mask=False, rand_size=False):
     border = 8
     mask = torch.ones((num_images, image_size, image_size), dtype=torch.bool, device=device)
     for i in range(num_images):
+        if rand_size:
+            mask_size = np.random.randint(5, image_size - 2 * border, size=2)
         if rand_mask:
             # Apply a random obstruction to the image (For now apply a grey box)
             top_left_y = np.random.randint(border, image_size-mask_size[0]-border)
@@ -93,8 +95,8 @@ def visualiseGAN(generator, filename):
 if __name__ == "__main__":
 
     ### TESTING WITH REPRODUCIBILITY. Remove when training
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(38)
+    np.random.seed(38)
     Model_Path = "Models"
     if not os.path.isdir(Model_Path):
         os.makedirs(Model_Path)
@@ -116,8 +118,6 @@ if __name__ == "__main__":
                                                    transforms.ToTensor(),
                                                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),  # Into [-1,1]
                                                ]))
-    # Apply black box obstruction transform using a lambda function probably
-    #trainsamp = datautils.SubsetRandomSampler(fixedsplit_train)    # Doesn't work with shuffle
     # If we want a fixed split use: datautils.Subset(dataset, indices), and initialise a dataloader with this
     num_train = round(0.95*len(dataset))
     num_test = len(dataset) - num_train
@@ -125,7 +125,7 @@ if __name__ == "__main__":
 
     # Create the dataloaders
     trainloader = datautils.DataLoader(traindata, batch_size=batch_size, shuffle=True, num_workers=n_workers)
-    testloader = datautils.DataLoader(testdata, batch_size=batch_size, shuffle=False, num_workers=n_workers)
+    testloader = datautils.DataLoader(testdata, batch_size=batch_size, shuffle=True, num_workers=n_workers)
 
 
     lr_nGAN = 0.0002
@@ -165,17 +165,16 @@ if __name__ == "__main__":
     # wgan_ep_steps = [0,1,2,3,4,6,8,12,16,22]
     # visualise_train_progress([wGAN.test_images_log[i] for i in wgan_ep_steps], 'wGANProgress', wgan_ep_steps)
 
-    #ite = iter(testloader)
-    #next(ite)
-    #getLowDiscVal(next(ite)[0], wGAN.G, wGAN.D, device)
-    # mask = createMask(10, image_size, device, mask_pos=(20,25), mask_size=(20,20), rand_mask=True)
-    #pixelWeightChoices('pixel_weight_powers', mask)
-    # recon_mask(next(iter(testloader))[0][0:10], mask, nGAN.G, nGAN.D, device=device)
-    # Maybe take in list of generators and discriminators
+    num_test_images = 8
+    test_iter = iter(testloader)
+    mask = createMask(num_test_images, image_size, device, mask_pos=(24,24), mask_size=(20,20), rand_mask=True, rand_size=True)
+    recon_mask(next(test_iter)[0][0:num_test_images], mask, wGAN.G, wGAN.D, device=device)
 
     # Apply basic Frechet distance calculation
-    inceptionModel = InceptionV3().to(device)
-    fid_value = figGenVsCelebA(wGAN.G, inceptionModel, num_images=20000, batch_size=100, cuda=cuda)
-    print(fid_value)
+    # inceptionModel = InceptionV3().to(device)
+    # fid_value = figGenVsCelebA(wGAN.G, inceptionModel, num_images=20000, batch_size=100, cuda=cuda)
+    # print(fid_value)
+
+    #pixelWeightChoices('pixel_weight_powers', mask)
 
     plt.show()
