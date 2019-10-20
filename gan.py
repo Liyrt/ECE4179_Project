@@ -146,16 +146,6 @@ if __name__ == "__main__":
     if start_from_checkpoint:
         wGAN.load_checkpoint(train=train_from_checkpoint)
 
-    # wGAN_gp = DC_GAN(device, 'wDC_gp_GAN_64_bSize', gan_type = 'wgan_gp')
-    # wD_gp_optimiser = optim.Adam(wGAN_gp.D.parameters(), lr=lr_wGAN_gp, betas=(0.5,0.9))
-    # wG_gp_optimiser = optim.Adam(wGAN_gp.G.parameters(), lr=lr_wGAN_gp, betas=(0.5,0.9))
-    # wGAN_gp.prep_train(wD_gp_optimiser, wG_gp_optimiser)
-    # if start_from_checkpoint:
-    #     wGAN_gp.load_checkpoint(train=train_from_checkpoint)
-    # wGAN_gp giving garbage (kinda face like, but all same outputs)
-    #wGAN_gp.train_loop(num_epochs, trainloader)
-
-
     #wGAN.train_loop(num_epochs, trainloader)
 
     #nGAN.train_loop(num_epochs, trainloader)

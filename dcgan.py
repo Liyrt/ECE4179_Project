@@ -83,19 +83,6 @@ class DC_Discriminator(nn.Module):
         ]
         if gan_type == 'normal':
             self.layers.append(nn.Sigmoid())        # Scale between 0 and 1
-        if gan_type == 'wgan_gp':
-            self.layers = [  # No bias since batch norm includes bias
-                nn.Conv2d(3, ndf, 4, stride=2, padding=1, bias=False),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(ndf, ndf * 2, 4, stride=2, padding=1, bias=False),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(ndf * 2, ndf * 4, 4, stride=2, padding=1, bias=False),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(ndf * 4, ndf * 8, 4, stride=2, padding=1, bias=False),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(ndf * 8, 1, 4, stride=1, padding=0, bias=False),
-                #nn.Sigmoid()
-            ]
         self.net = nn.Sequential(*self.layers)
 
     def forward(self, x):
@@ -108,7 +95,7 @@ class DC_GAN():
     # A GAN object with its own training methods, and network structure
 
     def __init__(self, device, model_name, gan_type = 'normal', n_channel_scale=64):
-        assert gan_type in ['normal', 'wgan', 'wgan_gp']        # DC gan types
+        assert gan_type in ['normal', 'wgan']        # DC gan types
         # WGAN with gradient penalty doesn't use batch normalisation
         self.model_name = model_name
         self.Model_Path = 'Models'
@@ -170,12 +157,6 @@ class DC_GAN():
             # Clip weights within range
             for param in self.D.parameters():
                 param.data.clamp(-0.01,0.01)        # Maybe replace with hyperparameter argument
-        elif self.gan_type == 'wgan_gp':
-            gradient_penalty = self.calc_grad_pen(images, G_out, self.device)
-            D_train_loss = -(torch.mean(D_real_out) - torch.mean(D_fake_out) - gradient_penalty) / 2
-            self.D.zero_grad()
-            D_train_loss.backward()
-            self.D_optimiser.step()
 
         loss_val = D_train_loss.item()
         self.disc_losses.append(loss_val)
@@ -195,7 +176,7 @@ class DC_GAN():
             self.G.zero_grad()
             G_train_loss.backward()
             self.G_optimiser.step()
-        elif self.gan_type == 'wgan' or self.gan_type == 'wgan_gp':
+        elif self.gan_type == 'wgan':
             G_train_loss = -torch.mean(D_result)
             self.G.zero_grad()
             G_train_loss.backward()
@@ -224,7 +205,7 @@ class DC_GAN():
                 D_train_loss = self.train_discriminator(b_size, images, label_real, label_fake)
 
                 ### TRAIN GENERATOR (every n_critic iterations, so that we train the generator on new batches always)
-                if self.gan_type == 'wgan' or self.gan_type == 'wgan_gp':
+                if self.gan_type == 'wgan':
                     if it % self.n_critic == 0:
                         G_train_loss = self.train_generator(b_size, label_real)
                         print('Epoch [%d/%d], Step [%d/%d], D_loss: %.4f, G_loss: %.4f'
